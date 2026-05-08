@@ -1,0 +1,21 @@
+experiment_name: prueba_adaptativo_lidar_01
+bag_path: ../bag/prueba_adaptativo_lidar_20260508_181907_0.db3
+
+estimate:
+  primary_topic: /odom
+  comparison_topics:
+    - /odom_raw
+    - /odom_raw_adapted
+
+ground_truth:
+  enabled: true
+  csv_path: ../gt/Take 2026-05-04 12.46.07 PM.csv
+  rigid_body_name: ROBOT
+
+alignment:
+  mode: first_sample
+  time_offset_sec: 0.0
+
+frames:
+  estimate_frame: odom
+  ground_truth_frame: optitrack_world

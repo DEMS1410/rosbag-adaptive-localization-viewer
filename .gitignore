@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.vendor/
+node_modules/
+dist/
+examples/local-session.yaml

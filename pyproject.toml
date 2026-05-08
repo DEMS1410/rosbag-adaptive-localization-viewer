@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosbag-adaptive-localization-viewer"
+version = "0.1.0"
+description = "Trajectory normalization and visualization pipeline for ROS 2 bags with OptiTrack ground truth."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "pyyaml>=6.0.2",
+  "rosbags>=0.10.5",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
