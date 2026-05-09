@@ -17,6 +17,10 @@ def normalize_series_time(series: TrajectorySeries) -> TrajectorySeries:
             z=sample.z,
             yaw_rad=sample.yaw_rad,
             error_m=sample.error_m,
+            cov_xx=sample.cov_xx,
+            cov_xy=sample.cov_xy,
+            cov_yy=sample.cov_yy,
+            yaw_var=sample.yaw_var,
             source=sample.source,
         )
         for sample in series.samples
@@ -98,6 +102,10 @@ def annotate_position_error(
                 z=sample.z,
                 yaw_rad=sample.yaw_rad,
                 error_m=error,
+                cov_xx=sample.cov_xx,
+                cov_xy=sample.cov_xy,
+                cov_yy=sample.cov_yy,
+                yaw_var=sample.yaw_var,
                 source=sample.source,
             )
         )

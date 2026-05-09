@@ -12,6 +12,10 @@ class TrajectorySample:
     z: float | None = None
     yaw_rad: float | None = None
     error_m: float | None = None
+    cov_xx: float | None = None
+    cov_xy: float | None = None
+    cov_yy: float | None = None
+    yaw_var: float | None = None
     source: str = "unknown"
 
 
