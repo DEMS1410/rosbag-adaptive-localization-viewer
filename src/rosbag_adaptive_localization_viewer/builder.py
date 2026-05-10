@@ -4,6 +4,7 @@ from pathlib import Path
 
 from rosbag_adaptive_localization_viewer.loaders.optitrack_csv import load_optitrack_rigid_body
 from rosbag_adaptive_localization_viewer.loaders.rosbag2 import (
+    extract_map_base_trajectory,
     extract_map_points,
     extract_scan_points,
     extract_trajectory_from_topic,
@@ -81,6 +82,19 @@ def build_experiment_payload(
         trajectories[0] = primary_series
         trajectories.append(downsample_series(gt_series, max_samples=4000))
 
+    map_base_samples, map_base_method = extract_map_base_trajectory(bag_path)
+    map_base_series: TrajectorySeries | None = None
+    if map_base_samples:
+        map_base_series = normalize_series_time(
+            TrajectorySeries(
+                id="map_base",
+                label="map -> base",
+                source_type="comparison",
+                samples=map_base_samples,
+            )
+        )
+        trajectories.append(downsample_series(map_base_series, max_samples=3000))
+
     upper_bound = trajectories[:-1] if gt_series is not None else trajectories
     for index, series in enumerate(upper_bound):
         if series.source_type == "comparison":
@@ -95,9 +109,10 @@ def build_experiment_payload(
     if gt_series is not None:
         metrics.update(compute_position_error_metrics(primary_series, gt_series))
 
-    t0 = primary_samples[0].t_sec if primary_samples else 0.0
+    reference_samples = map_base_samples if map_base_samples else primary_samples
+    t0 = reference_samples[0].t_sec if reference_samples else 0.0
     map_points = extract_map_points(bag_path)
-    scans = extract_scan_points(bag_path, primary_samples)
+    scans = extract_scan_points(bag_path, reference_samples)
     scene = {
         "map": map_points,
         "scans": [
@@ -107,6 +122,7 @@ def build_experiment_payload(
             }
             for scan in scans
         ],
+        "map_base_method": map_base_method,
     }
 
     return {

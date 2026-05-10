@@ -9,6 +9,7 @@ const settingsStorageKey = "adaptive-localization-viewer-settings";
 
 const defaultLayerColors: Record<string, string> = {
   ground_truth: "#0f172a",
+  map_base: "#16a34a",
   odom: "#f97316",
   odom_raw: "#38bdf8",
   odom_raw_adapted: "#10b981",
@@ -22,6 +23,7 @@ const colorPresets: Record<string, Record<string, string>> = {
   dgist: defaultLayerColors,
   contrast: {
     ground_truth: "#f8fafc",
+    map_base: "#22c55e",
     odom: "#f97316",
     odom_raw: "#22d3ee",
     odom_raw_adapted: "#34d399",
@@ -32,6 +34,7 @@ const colorPresets: Record<string, Record<string, string>> = {
   },
   soft: {
     ground_truth: "#cbd5e1",
+    map_base: "#4ade80",
     odom: "#fb923c",
     odom_raw: "#60a5fa",
     odom_raw_adapted: "#2dd4bf",
@@ -455,14 +458,7 @@ export default function App() {
     const traces: object[] = [];
     const map = experiment.scene?.map;
     if (showMap && map?.grid?.length) {
-      const heatmapRows = [...map.grid].reverse().map((row) =>
-        row.map((value) => {
-          if (value < 0) {
-            return null;
-          }
-          return value / 100;
-        }),
-      );
+      const heatmapRows = [...map.grid].reverse();
       traces.push({
         z: heatmapRows,
         type: "heatmap" as const,
@@ -471,16 +467,19 @@ export default function App() {
         dx: map.resolution,
         y0: map.origin[1] + map.resolution / 2,
         dy: map.resolution,
-        zmin: 0,
-        zmax: 1,
+        zmin: -1,
+        zmax: 100,
         colorscale: [
-          [0, "rgba(15,23,42,0.0)"],
-          [0.35, "rgba(51,65,85,0.16)"],
-          [0.7, "rgba(148,163,184,0.34)"],
-          [1, layerColors.map],
+          [0.0, "#f8fafc"],
+          [0.009, "#f8fafc"],
+          [0.01, "#2b0a4a"],
+          [0.6, "#2b0a4a"],
+          [0.61, "#fde047"],
+          [1.0, "#fde047"],
         ],
         showscale: false,
-        hoverinfo: "skip" as const,
+        opacity: 0.92,
+        hovertemplate: "map x=%{x:.2f}<br>y=%{y:.2f}<br>occ=%{z}<extra></extra>",
       });
     } else if (showMap && map?.occupied_points?.length) {
       traces.push({
@@ -882,6 +881,12 @@ export default function App() {
             <span>Visible layers</span>
             <strong>{visibleSeries.length}</strong>
           </div>
+          {experiment.scene?.map_base_method ? (
+            <div className="meta-row">
+              <span>Map/base TF</span>
+              <strong>{experiment.scene.map_base_method}</strong>
+            </div>
+          ) : null}
           <label className="upload-box">
             <span>Load experiment JSON</span>
             <input accept=".json,application/json" type="file" onChange={onFileSelected} />
@@ -1014,6 +1019,7 @@ export default function App() {
               { id: "odom", label: "/odom" },
               { id: "odom_raw", label: "/odom_raw" },
               { id: "odom_raw_adapted", label: "/odom_raw_adapted" },
+              { id: "map_base", label: "map -> base" },
               { id: "ground_truth", label: "ROBOT / GT" },
               { id: "map", label: "Map" },
               { id: "lidar", label: "Lidar" },

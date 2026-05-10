@@ -33,6 +33,7 @@ export type ExperimentData = {
       occupied_points: [number, number][];
       grid: number[][];
     } | null;
+    map_base_method?: string | null;
     scans?: {
       t_sec: number;
       points: [number, number][];

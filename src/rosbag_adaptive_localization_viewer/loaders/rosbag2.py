@@ -38,6 +38,24 @@ def _yaw_from_quaternion(qx: float, qy: float, qz: float, qw: float) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def _wrap_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _compose_2d(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    ax, ay, ayaw = a
+    bx, by, byaw = b
+    ca = math.cos(ayaw)
+    sa = math.sin(ayaw)
+    x = ax + ca * bx - sa * by
+    y = ay + sa * bx + ca * by
+    yaw = _wrap_angle(ayaw + byaw)
+    return x, y, yaw
+
+
 def _interpolate_pose(samples: list[TrajectorySample], t_sec: float) -> tuple[float, float, float] | None:
     if not samples:
         return None
@@ -116,6 +134,115 @@ def extract_trajectory_from_topic(db3_path: str | Path, topic: str) -> list[Traj
     return samples
 
 
+def extract_tf_pair_trajectory(
+    db3_path: str | Path,
+    parent_frame: str,
+    child_frame: str,
+    topics: tuple[str, ...] = ("/tf", "/tf_static"),
+) -> list[TrajectorySample]:
+    from rosbags.highlevel import AnyReader
+    from rosbags.typesys import Stores, get_typestore
+
+    bag_path = Path(db3_path)
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    samples: list[TrajectorySample] = []
+
+    with AnyReader([bag_path], default_typestore=typestore) as reader:
+        connections = [connection for connection in reader.connections if connection.topic in topics]
+        if not connections:
+            return []
+
+        for connection, timestamp, rawdata in reader.messages(connections=connections):
+            msg = reader.deserialize(rawdata, connection.msgtype)
+            for transform_stamped in msg.transforms:
+                if transform_stamped.header.frame_id != parent_frame:
+                    continue
+                if transform_stamped.child_frame_id != child_frame:
+                    continue
+
+                transform = transform_stamped.transform
+                translation = transform.translation
+                rotation = transform.rotation
+                transform_time_ns = (
+                    int(transform_stamped.header.stamp.sec) * 1_000_000_000
+                    + int(transform_stamped.header.stamp.nanosec)
+                )
+                if transform_time_ns <= 0:
+                    transform_time_ns = timestamp
+
+                samples.append(
+                    TrajectorySample(
+                        t_sec=transform_time_ns / 1e9,
+                        x=float(translation.x),
+                        y=float(translation.y),
+                        z=float(translation.z),
+                        yaw_rad=_yaw_from_quaternion(
+                            float(rotation.x),
+                            float(rotation.y),
+                            float(rotation.z),
+                            float(rotation.w),
+                        ),
+                        source=f"{parent_frame}->{child_frame}",
+                    )
+                )
+
+    samples.sort(key=lambda sample: sample.t_sec)
+    return samples
+
+
+def extract_map_base_trajectory(
+    db3_path: str | Path,
+    base_candidates: tuple[str, ...] = ("base_footprint", "base_link"),
+    tolerance_sec: float = 0.05,
+) -> tuple[list[TrajectorySample], str | None]:
+    for base_frame in base_candidates:
+        direct = extract_tf_pair_trajectory(db3_path, "map", base_frame)
+        if direct:
+            return direct, f"direct: map->{base_frame}"
+
+    map_odom = extract_tf_pair_trajectory(db3_path, "map", "odom")
+    if not map_odom:
+        return [], None
+
+    for base_frame in base_candidates:
+        odom_base = extract_tf_pair_trajectory(db3_path, "odom", base_frame)
+        if not odom_base:
+            continue
+
+        records: list[TrajectorySample] = []
+        right_index = 0
+        for left in map_odom:
+            while right_index + 1 < len(odom_base) and odom_base[right_index + 1].t_sec <= left.t_sec:
+                right_index += 1
+
+            candidates = [odom_base[right_index]]
+            if right_index + 1 < len(odom_base):
+                candidates.append(odom_base[right_index + 1])
+
+            nearest = min(candidates, key=lambda sample: abs(sample.t_sec - left.t_sec))
+            if abs(nearest.t_sec - left.t_sec) > tolerance_sec:
+                continue
+
+            x, y, yaw = _compose_2d(
+                (left.x, left.y, left.yaw_rad or 0.0),
+                (nearest.x, nearest.y, nearest.yaw_rad or 0.0),
+            )
+            records.append(
+                TrajectorySample(
+                    t_sec=left.t_sec,
+                    x=x,
+                    y=y,
+                    yaw_rad=yaw,
+                    source=f"map->{base_frame}",
+                )
+            )
+
+        if records:
+            return records, f"composed: map->odom + odom->{base_frame}"
+
+    return [], None
+
+
 def extract_map_points(db3_path: str | Path, topic: str = "/map") -> dict | None:
     from rosbags.highlevel import AnyReader
     from rosbags.typesys import Stores, get_typestore
@@ -128,6 +255,7 @@ def extract_map_points(db3_path: str | Path, topic: str = "/map") -> dict | None
         if not connections:
             return None
 
+        latest_map: dict | None = None
         for connection, _, rawdata in reader.messages(connections=connections):
             msg = reader.deserialize(rawdata, connection.msgtype)
             resolution = float(msg.info.resolution)
@@ -146,7 +274,7 @@ def extract_map_points(db3_path: str | Path, topic: str = "/map") -> dict | None
                 x = origin_x + (col + 0.5) * resolution
                 y = origin_y + (row + 0.5) * resolution
                 occupied.append([x, y])
-            return {
+            latest_map = {
                 "resolution": resolution,
                 "width": width,
                 "height": height,
@@ -154,6 +282,7 @@ def extract_map_points(db3_path: str | Path, topic: str = "/map") -> dict | None
                 "occupied_points": occupied,
                 "grid": grid,
             }
+        return latest_map
     return None
 
 
