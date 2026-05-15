@@ -179,6 +179,42 @@ function wedgeTrace(x: number, y: number, yaw: number, yawVar: number, radius: n
   return { x: xs, y: ys };
 }
 
+/**
+ * Oriented triangle marker — tip points in the yaw direction.
+ * Returns a closed Plotly scatter trace (filled polygon in map coordinates).
+ *   tip  : distance forward from center to front vertex  [m]
+ *   wing : half-width at the rear base                   [m]
+ *   rear : distance backward from center to rear base    [m]
+ */
+function poseTriangleTrace(
+  x: number, y: number,
+  yaw: number,
+  color: string,
+  name: string,
+  tip = 0.28, wing = 0.16, rear = 0.10,
+) {
+  const perp = yaw + Math.PI / 2;
+  const tipX  = x + tip  * Math.cos(yaw);
+  const tipY  = y + tip  * Math.sin(yaw);
+  const baseX = x - rear * Math.cos(yaw);
+  const baseY = y - rear * Math.sin(yaw);
+  const lx = baseX + wing * Math.cos(perp);
+  const ly = baseY + wing * Math.sin(perp);
+  const rx = baseX - wing * Math.cos(perp);
+  const ry = baseY - wing * Math.sin(perp);
+  return {
+    x: [tipX, lx, rx, tipX],
+    y: [tipY, ly, ry, tipY],
+    type: "scatter" as const, mode: "lines",
+    name,
+    fill: "toself" as const,
+    fillcolor: color,
+    line: { color: "#ffffff", width: 1.2 },
+    showlegend: false,
+    hoverinfo: "skip" as const,
+  };
+}
+
 // ── Small reusable components ───────────────────────────────────────────────
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -226,11 +262,11 @@ export default function App() {
   const [showKeyboardHints, setShowKeyboardHints] = useState(persistedSettings.showKeyboardHints ?? true);
 
   // Covariance
-  const [covarianceMode, setCovarianceMode] = useState<"current" | "trail">(persistedSettings.covarianceMode ?? "current");
+  const [covarianceMode, setCovarianceMode] = useState<"current" | "trail">(persistedSettings.covarianceMode ?? "trail");
   const [ellipseStride, setEllipseStride] = useState(persistedSettings.ellipseStride ?? 12);
   const [sigmaMultiplier, setSigmaMultiplier] = useState(persistedSettings.sigmaMultiplier ?? 3);
   const [tailWindowSec, setTailWindowSec] = useState(persistedSettings.tailWindowSec ?? 8);
-  const [covarianceTrailCount, setCovarianceTrailCount] = useState(persistedSettings.covarianceTrailCount ?? 6);
+  const [covarianceTrailCount, setCovarianceTrailCount] = useState(persistedSettings.covarianceTrailCount ?? 10);
 
   // Colors
   const [layerColors, setLayerColors] = useState({ ...defaultLayerColors, ...(persistedSettings.layerColors ?? {}) });
@@ -363,12 +399,19 @@ export default function App() {
     const map = experiment.scene?.map;
     if (showMap && map?.grid?.length) {
       traces.push({
-        z: [...map.grid].reverse(), type: "heatmap" as const, name: "map",
+        z: map.grid, type: "heatmap" as const, name: "map",
         x0: map.origin[0] + map.resolution / 2, dx: map.resolution,
         y0: map.origin[1] + map.resolution / 2, dy: map.resolution,
         zmin: -1, zmax: 100,
-        colorscale: [[0.0,"#f8fafc"],[0.009,"#f8fafc"],[0.01,"#2b0a4a"],[0.6,"#2b0a4a"],[0.61,"#fde047"],[1.0,"#fde047"]],
-        showscale: false, opacity: 0.92,
+        // Normalized thresholds: z=-1 → 0.0, z=0 → 0.0099, z=49 → 0.495, z=50 → 0.505
+        // Unknown (-1): dark background. Free (0-49): rich purple matching matplotlib output.
+        // Occupied (≥50): yellow.
+        colorscale: [
+          [0.000, "#030712"], [0.0099, "#030712"],  // unknown cells → invisible
+          [0.010, "#3b0764"], [0.495,  "#4c1d95"],  // free space → purple gradient
+          [0.505, "#fde047"], [1.000,  "#f59e0b"],  // occupied → amber/yellow
+        ],
+        showscale: false, opacity: 0.95,
         hovertemplate: "map x=%{x:.2f}<br>y=%{y:.2f}<br>occ=%{z}<extra></extra>",
       });
     } else if (showMap && map?.occupied_points?.length) {
@@ -425,7 +468,7 @@ export default function App() {
       traces.push({
         x: trajectory.samples.map((s) => s.x), y: trajectory.samples.map((s) => s.y),
         type: "scattergl" as const, mode: "lines", name: `${trajectory.label} full`,
-        line: { color: trajectory.source_type === "ground_truth" ? "rgba(148,163,184,0.25)" : "rgba(71,85,105,0.35)", width: trajectory.source_type === "ground_truth" ? 3 : 2, dash: "dot" },
+        line: { color: trajectory.source_type === "ground_truth" ? "rgba(148,163,184,0.18)" : "rgba(71,85,105,0.28)", width: trajectory.source_type === "ground_truth" ? 3 : 2, dash: "dot" },
         hoverinfo: "skip" as const, showlegend: false,
       });
     }
@@ -447,17 +490,67 @@ export default function App() {
       });
     }
 
+    // ── Glow layer (wide, semi-transparent) behind the main line ──────────
+    const isGT = trajectory.source_type === "ground_truth";
+    const isCmp = trajectory.source_type === "comparison";
+    const mainWidth = isGT ? (isSimulationMode ? 5 : 4) : isCmp ? (isSimulationMode ? 3 : 2.5) : (isSimulationMode ? 4 : 3.5);
+    traces.push({
+      x: visibleSamples.map((s) => s.x), y: visibleSamples.map((s) => s.y),
+      type: "scattergl" as const, mode: "lines", name: "",
+      line: { color: `${color}30`, width: mainWidth * 3.5 },
+      hoverinfo: "skip" as const, showlegend: false,
+    });
+
+    // ── Main trajectory line ───────────────────────────────────────────────
     traces.push({
       x: visibleSamples.map((s) => s.x), y: visibleSamples.map((s) => s.y),
       type: "scattergl" as const, mode: "lines", name: trajectory.label,
-      line: { color, width: trajectory.source_type === "ground_truth" ? (isSimulationMode ? 6 : 5) : isSimulationMode ? 4 : 3, dash: trajectory.source_type === "comparison" ? "dot" : "solid" },
+      line: {
+        color,
+        width: mainWidth,
+        dash: isCmp ? "dot" : "solid",
+      },
     });
 
-    if (showCurrentMarkers && focus) {
+    // ── Start / End markers ───────────────────────────────────────────────
+    if (trajectory.samples.length > 0) {
+      const first = trajectory.samples[0];
+      const last = trajectory.samples[trajectory.samples.length - 1];
+      // Start: filled circle
+      traces.push({
+        x: [first.x], y: [first.y],
+        type: "scatter" as const, mode: "markers",
+        name: `${trajectory.label} inicio`,
+        marker: { color, size: isSimulationMode ? 13 : 10, symbol: "circle", line: { color: "#ffffff", width: 2 } },
+        hovertemplate: `<b>${trajectory.label} inicio</b><br>x=%{x:.3f} m<br>y=%{y:.3f} m<extra></extra>`,
+        showlegend: true,
+      });
+      // End: X marker
+      traces.push({
+        x: [last.x], y: [last.y],
+        type: "scatter" as const, mode: "markers",
+        name: `${trajectory.label} fin`,
+        marker: { color, size: isSimulationMode ? 14 : 11, symbol: "x", line: { color: "#ffffff", width: 2 } },
+        hovertemplate: `<b>${trajectory.label} fin</b><br>x=%{x:.3f} m<br>y=%{y:.3f} m<extra></extra>`,
+        showlegend: true,
+      });
+    }
+
+    // ── Pose triangle (oriented marker at current sample) ─────────────────
+    if (showCurrentMarkers && focus && focus.yaw_rad != null) {
+      traces.push(poseTriangleTrace(
+        focus.x, focus.y, focus.yaw_rad, color,
+        `${trajectory.label} @ t`,
+        isSimulationMode ? 0.35 : 0.28,
+        isSimulationMode ? 0.20 : 0.16,
+        isSimulationMode ? 0.13 : 0.10,
+      ));
+    } else if (showCurrentMarkers && focus && focus.yaw_rad == null) {
+      // GT without yaw — fall back to circle
       traces.push({
         x: [focus.x], y: [focus.y], type: "scatter" as const, mode: "markers",
         name: `${trajectory.label} @ t`,
-        marker: { color, size: isSimulationMode ? 15 : 12, line: { color: "#ffffff", width: 2 } },
+        marker: { color, size: isSimulationMode ? 14 : 11, symbol: "circle", line: { color: "#ffffff", width: 1.5 } },
         showlegend: false,
       });
     }
@@ -475,25 +568,45 @@ export default function App() {
       ? [played[played.length - 1]]
       : played.filter((_, i) => i % ellipseStride === 0).slice(-covarianceTrailCount);
 
-    for (let i = 0; i < sourceSamples.length; i++) {
+    const n = sourceSamples.length;
+    for (let i = 0; i < n; i++) {
       const s = sourceSamples[i];
-      if (s.cov_xx == null || s.cov_xy == null || s.cov_yy == null || !Number.isFinite(s.cov_xx) || !Number.isFinite(s.cov_xy) || !Number.isFinite(s.cov_yy)) continue;
+      if (
+        s.cov_xx == null || s.cov_xy == null || s.cov_yy == null ||
+        !Number.isFinite(s.cov_xx) || !Number.isFinite(s.cov_xy) || !Number.isFinite(s.cov_yy)
+      ) continue;
+
       const ellipse = ellipseTrace(s.x, s.y, s.cov_xx, s.cov_xy, s.cov_yy, sigmaMultiplier);
+
+      // Opacity fades for older ellipses: newest = full, oldest = 20%
+      const ageFraction = n > 1 ? i / (n - 1) : 1;   // 0 = oldest, 1 = newest
+      const strokeAlpha = Math.round(0x20 + ageFraction * 0xb0).toString(16).padStart(2, "0");
+      const fillAlpha   = Math.round(0x08 + ageFraction * 0x22).toString(16).padStart(2, "0");
+      const strokeW     = covarianceMode === "current" ? 2.5 : 0.8 + ageFraction * 1.6;
+
       traces.push({
-        x: ellipse.x, y: ellipse.y, type: "scattergl" as const, mode: "lines", name: "xy Cov",
-        line: { color: covarianceMode === "current" ? layerColors.covariance : `${layerColors.covariance}88`, width: covarianceMode === "current" ? 2.5 : 1.5 },
+        x: ellipse.x, y: ellipse.y,
+        type: "scattergl" as const, mode: "lines",
+        name: i === n - 1 ? `Σ xy (${sigmaMultiplier}σ)` : "",
+        line: { color: `${layerColors.covariance}${strokeAlpha}`, width: strokeW },
         fill: "toself" as const,
-        fillcolor: covarianceMode === "current" ? `${layerColors.covariance}22` : `${layerColors.covariance}12`,
-        showlegend: i === 0, hoverinfo: "skip" as const,
+        fillcolor: `${layerColors.covariance}${fillAlpha}`,
+        showlegend: i === n - 1,
+        hoverinfo: "skip" as const,
       });
     }
+
+    // Yaw wedge at current pose (Siegwart: ±nσ_θ)
     const focus = currentSample(estimateSeries, selectedTime);
     if (showWedge && focus?.yaw_rad != null && focus?.yaw_var != null) {
       const wedge = wedgeTrace(focus.x, focus.y, focus.yaw_rad, focus.yaw_var, 0.45, sigmaMultiplier);
       traces.push({
-        x: wedge.x, y: wedge.y, type: "scattergl" as const, mode: "lines", name: "yaw ±σ",
-        line: { color: layerColors.yaw, width: 1.5 },
-        fill: "toself" as const, fillcolor: `${layerColors.yaw}20`,
+        x: wedge.x, y: wedge.y,
+        type: "scattergl" as const, mode: "lines",
+        name: `θ ±${sigmaMultiplier}σ`,
+        line: { color: layerColors.yaw, width: 1.8 },
+        fill: "toself" as const,
+        fillcolor: `${layerColors.yaw}28`,
       });
     }
     return traces;
@@ -637,149 +750,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ══ MAIN PLOT ═══════════════════════════════════════════════════════ */}
-      <section className="panel chart-panel">
-        <div className="chart-header">
-          <div>
-            <p className="eyebrow">Spatial View</p>
-            <h2>Trajectory Overlay</h2>
-          </div>
-          <div className="chart-header-right">
-            <span className="time-readout">{selectedTime.toFixed(2)} s</span>
-            {isSimulationMode && showKeyboardHints && (
-              <span className="keyboard-hint">Space · A/D · R · M · L · C</span>
-            )}
-          </div>
-        </div>
-        <Plot
-          data={[...sceneTraces, ...plotData, ...covarianceTraces]}
-          layout={{
-            autosize: true,
-            paper_bgcolor: "rgba(0,0,0,0)",
-            plot_bgcolor: "#07111f",
-            font: { color: "#dbeafe", family: "Inter, Segoe UI, sans-serif" },
-            margin: { l: 50, r: 50, t: 20, b: 50 },
-            xaxis: { title: "X [m]", gridcolor: "#1e293b", zerolinecolor: "#334155", range: plotBounds?.x },
-            yaxis: { title: "Y [m]", gridcolor: "#1e293b", zerolinecolor: "#334155", scaleanchor: "x", scaleratio: 1, range: plotBounds?.y },
-            legend: { orientation: "h", x: 0, y: 1.12, bgcolor: "rgba(7,17,31,0.65)" },
-          }}
-          style={{ height: "580px", width: "100%" }}
-          useResizeHandler
-        />
-      </section>
-
-      {/* ══ TRANSPORT BAR ═══════════════════════════════════════════════════ */}
-      <section className="transport-bar">
-        {/* Left: Mode */}
-        <div className="transport-left">
-          <span className="rack-label">Mode</span>
-          <div className="transport-mode-row">
-            <button className={`mode-btn${appMode === "analysis" ? " active" : ""}`} type="button" onClick={() => setAppMode("analysis")}>Analysis</button>
-            <button className={`mode-btn${appMode === "simulation" ? " active" : ""}`} type="button" onClick={() => setAppMode("simulation")}>Simulation</button>
-          </div>
-        </div>
-
-        {/* Center: Controls + scrubber */}
-        <div className="transport-center">
-          <div className="transport-controls">
-            <button className="transport-btn" type="button" title="Reset" onClick={() => { setSelectedTime(0); setIsPlaying(false); }}>⏮</button>
-            <button className={`transport-btn play-btn${isPlaying ? " playing" : ""}`} type="button" title={isPlaying ? "Pause" : "Play"} onClick={() => setIsPlaying((v) => !v)}>
-              {isPlaying ? "⏸" : "▶"}
-            </button>
-            <button className="transport-btn" type="button" title="+1 second" onClick={() => setSelectedTime((v) => Math.min(maxTime, v + 1))}>⏭</button>
-          </div>
-          <div className="transport-scrubber-row">
-            <span className="transport-time">{selectedTime.toFixed(1)} s</span>
-            <input className="scrubber" max={maxTime} min={0} step={0.1} type="range" value={selectedTime} onChange={(e) => setSelectedTime(Number(e.target.value))} />
-            <span className="transport-time transport-time-end">{maxTime.toFixed(1)} s</span>
-          </div>
-          <div className="progress-rail"><div className="progress-fill" style={{ width: `${progressPct}%` }} /></div>
-        </div>
-
-        {/* Right: Rate + Playback mode */}
-        <div className="transport-right">
-          <div className="transport-rate-row">
-            <span className="rack-label">Rate</span>
-            <select className="rate-select" value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))}>
-              <option value={0.5}>0.5×</option>
-              <option value={1}>1×</option>
-              <option value={2}>2×</option>
-              <option value={4}>4×</option>
-            </select>
-          </div>
-          <div className="transport-mode-row">
-            <button className={`mode-btn${playbackMode === "progressive" ? " active" : ""}`} type="button" onClick={() => setPlaybackMode("progressive")}>Progressive</button>
-            <button className={`mode-btn${playbackMode === "full" ? " active" : ""}`} type="button" onClick={() => setPlaybackMode("full")}>Full View</button>
-          </div>
-        </div>
-      </section>
-
-      {/* ══ BOTTOM GRID ═════════════════════════════════════════════════════ */}
-      <section className="bottom-grid">
-        {/* Error chart */}
-        {showErrorChart ? (
-          <section className="panel">
-            <p className="eyebrow">Temporal Error</p>
-            <h2>Error vs Time</h2>
-            <Plot
-              data={errorPlotData}
-              layout={{
-                autosize: true,
-                paper_bgcolor: "rgba(0,0,0,0)",
-                plot_bgcolor: "#160b0a",
-                font: { color: "#fde68a", family: "Inter, Segoe UI, sans-serif" },
-                margin: { l: 50, r: 24, t: 16, b: 44 },
-                xaxis: { title: "Time [s]", gridcolor: "#4a1d1f" },
-                yaxis: { title: "Position Error [m]", gridcolor: "#4a1d1f" },
-                shapes: [{ type: "line", x0: selectedTime, x1: selectedTime, y0: 0, y1: 1, yref: "paper", line: { color: "#f59e0b", width: 2, dash: "dot" } }],
-              }}
-              style={{ height: "260px", width: "100%" }}
-              useResizeHandler
-            />
-          </section>
-        ) : null}
-
-        {/* State snapshot */}
-        <section className="panel snapshot-panel">
-          <p className="eyebrow">State Snapshot</p>
-          <h2>Current Samples</h2>
-          <div className="snapshot-grid">
-            <article className="snapshot-card">
-              <span>Estimate XY</span>
-              <strong>{fmt(estimateSample?.x, 2)}, {fmt(estimateSample?.y, 2)}</strong>
-              <small>yaw {fmt(estimateSample?.yaw_rad, 2, " rad")}</small>
-            </article>
-            <article className="snapshot-card">
-              <span>Ground Truth XY</span>
-              <strong>{fmt(gtSample?.x, 2)}, {fmt(gtSample?.y, 2)}</strong>
-              <small>time-sync view</small>
-            </article>
-            <article className="snapshot-card accent">
-              <span>Instant Error</span>
-              <strong>{fmt(estimateSample?.error_m, 3, " m")}</strong>
-              <small>estimate vs GT</small>
-            </article>
-            <article className="snapshot-card">
-              <span>Scene</span>
-              <strong>{experiment.scene?.map?.occupied_points?.length ?? 0} map · {currentSceneScan?.points.length ?? 0} lidar</strong>
-              <small>current overlay</small>
-            </article>
-          </div>
-          <div className="inventory-list">
-            {experiment.trajectories.map((t) => (
-              <article key={t.id} className="inventory-card">
-                <div className="inventory-title">
-                  <span className="swatch" style={{ backgroundColor: layerColors[t.id] ?? "#8b5cf6" }} />
-                  <strong>{t.label}</strong>
-                </div>
-                <span>{t.samples.length} samples</span>
-              </article>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      {/* ══ SETTINGS DRAWER ═════════════════════════════════════════════════ */}
+      {/* ══ SETTINGS DRAWER (inline, below toolbar) ═════════════════════════ */}
       <div className={`settings-drawer${settingsOpen ? " open" : ""}`}>
         <div className="settings-grid">
 
@@ -922,6 +893,148 @@ export default function App() {
 
         </div>
       </div>
+
+      {/* ══ MAIN PLOT ═══════════════════════════════════════════════════════ */}
+      <section className="panel chart-panel">
+        <div className="chart-header">
+          <div>
+            <p className="eyebrow">Spatial View</p>
+            <h2>Trajectory Overlay</h2>
+          </div>
+          <div className="chart-header-right">
+            <span className="time-readout">{selectedTime.toFixed(2)} s</span>
+            {isSimulationMode && showKeyboardHints && (
+              <span className="keyboard-hint">Space · A/D · R · M · L · C</span>
+            )}
+          </div>
+        </div>
+        <Plot
+          data={[...sceneTraces, ...plotData, ...covarianceTraces]}
+          layout={{
+            autosize: true,
+            paper_bgcolor: "rgba(0,0,0,0)",
+            plot_bgcolor: "#030712",
+            font: { color: "#dbeafe", family: "Inter, Segoe UI, sans-serif" },
+            margin: { l: 50, r: 50, t: 20, b: 50 },
+            xaxis: { title: "X [m]", gridcolor: "#1e293b", zerolinecolor: "#334155", range: plotBounds?.x },
+            yaxis: { title: "Y [m]", gridcolor: "#1e293b", zerolinecolor: "#334155", scaleanchor: "x", scaleratio: 1, range: plotBounds?.y },
+            legend: { orientation: "h", x: 0, y: 1.12, bgcolor: "rgba(7,17,31,0.65)" },
+          }}
+          style={{ height: "580px", width: "100%" }}
+          useResizeHandler
+        />
+      </section>
+
+      {/* ══ TRANSPORT BAR ═══════════════════════════════════════════════════ */}
+      <section className="transport-bar">
+        {/* Left: Mode */}
+        <div className="transport-left">
+          <span className="rack-label">Mode</span>
+          <div className="transport-mode-row">
+            <button className={`mode-btn${appMode === "analysis" ? " active" : ""}`} type="button" onClick={() => setAppMode("analysis")}>Analysis</button>
+            <button className={`mode-btn${appMode === "simulation" ? " active" : ""}`} type="button" onClick={() => setAppMode("simulation")}>Simulation</button>
+          </div>
+        </div>
+
+        {/* Center: Controls + scrubber */}
+        <div className="transport-center">
+          <div className="transport-controls">
+            <button className="transport-btn" type="button" title="Reset" onClick={() => { setSelectedTime(0); setIsPlaying(false); }}>⏮</button>
+            <button className={`transport-btn play-btn${isPlaying ? " playing" : ""}`} type="button" title={isPlaying ? "Pause" : "Play"} onClick={() => setIsPlaying((v) => !v)}>
+              {isPlaying ? "⏸" : "▶"}
+            </button>
+            <button className="transport-btn" type="button" title="+1 second" onClick={() => setSelectedTime((v) => Math.min(maxTime, v + 1))}>⏭</button>
+          </div>
+          <div className="transport-scrubber-row">
+            <span className="transport-time">{selectedTime.toFixed(1)} s</span>
+            <input className="scrubber" max={maxTime} min={0} step={0.1} type="range" value={selectedTime} onChange={(e) => setSelectedTime(Number(e.target.value))} />
+            <span className="transport-time transport-time-end">{maxTime.toFixed(1)} s</span>
+          </div>
+          <div className="progress-rail"><div className="progress-fill" style={{ width: `${progressPct}%` }} /></div>
+        </div>
+
+        {/* Right: Rate + Playback mode */}
+        <div className="transport-right">
+          <div className="transport-rate-row">
+            <span className="rack-label">Rate</span>
+            <select className="rate-select" value={playbackRate} onChange={(e) => setPlaybackRate(Number(e.target.value))}>
+              <option value={0.5}>0.5×</option>
+              <option value={1}>1×</option>
+              <option value={2}>2×</option>
+              <option value={4}>4×</option>
+            </select>
+          </div>
+          <div className="transport-mode-row">
+            <button className={`mode-btn${playbackMode === "progressive" ? " active" : ""}`} type="button" onClick={() => setPlaybackMode("progressive")}>Progressive</button>
+            <button className={`mode-btn${playbackMode === "full" ? " active" : ""}`} type="button" onClick={() => setPlaybackMode("full")}>Full View</button>
+          </div>
+        </div>
+      </section>
+
+      {/* ══ BOTTOM GRID ════════════════════════════════════ */}
+      <section className="bottom-grid">
+        {/* Error chart */}
+        {showErrorChart ? (
+          <section className="panel">
+            <p className="eyebrow">Temporal Error</p>
+            <h2>Error vs Time</h2>
+            <Plot
+              data={errorPlotData}
+              layout={{
+                autosize: true,
+                paper_bgcolor: "rgba(0,0,0,0)",
+                plot_bgcolor: "#160b0a",
+                font: { color: "#fde68a", family: "Inter, Segoe UI, sans-serif" },
+                margin: { l: 50, r: 24, t: 16, b: 44 },
+                xaxis: { title: "Time [s]", gridcolor: "#4a1d1f" },
+                yaxis: { title: "Position Error [m]", gridcolor: "#4a1d1f" },
+                shapes: [{ type: "line", x0: selectedTime, x1: selectedTime, y0: 0, y1: 1, yref: "paper", line: { color: "#f59e0b", width: 2, dash: "dot" } }],
+              }}
+              style={{ height: "260px", width: "100%" }}
+              useResizeHandler
+            />
+          </section>
+        ) : null}
+
+        {/* State snapshot */}
+        <section className="panel snapshot-panel">
+          <p className="eyebrow">State Snapshot</p>
+          <h2>Current Samples</h2>
+          <div className="snapshot-grid">
+            <article className="snapshot-card">
+              <span>Estimate XY</span>
+              <strong>{fmt(estimateSample?.x, 2)}, {fmt(estimateSample?.y, 2)}</strong>
+              <small>yaw {fmt(estimateSample?.yaw_rad, 2, " rad")}</small>
+            </article>
+            <article className="snapshot-card">
+              <span>Ground Truth XY</span>
+              <strong>{fmt(gtSample?.x, 2)}, {fmt(gtSample?.y, 2)}</strong>
+              <small>time-sync view</small>
+            </article>
+            <article className="snapshot-card accent">
+              <span>Instant Error</span>
+              <strong>{fmt(estimateSample?.error_m, 3, " m")}</strong>
+              <small>estimate vs GT</small>
+            </article>
+            <article className="snapshot-card">
+              <span>Scene</span>
+              <strong>{experiment.scene?.map?.occupied_points?.length ?? 0} map · {currentSceneScan?.points.length ?? 0} lidar</strong>
+              <small>current overlay</small>
+            </article>
+          </div>
+          <div className="inventory-list">
+            {experiment.trajectories.map((t) => (
+              <article key={t.id} className="inventory-card">
+                <div className="inventory-title">
+                  <span className="swatch" style={{ backgroundColor: layerColors[t.id] ?? "#8b5cf6" }} />
+                  <strong>{t.label}</strong>
+                </div>
+                <span>{t.samples.length} samples</span>
+              </article>
+            ))}
+          </div>
+        </section>
+      </section>
 
     </div>
   );

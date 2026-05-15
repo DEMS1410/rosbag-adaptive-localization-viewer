@@ -27,12 +27,13 @@ def build_experiment_payload(
     comparison_topics: list[str] | None = None,
     optitrack_csv_path: str | Path | None = None,
     rigid_body_name: str = "ROBOT",
+    ros_distro: str = "humble",
 ) -> dict:
     bag_path = Path(bag_path)
     comparison_topics = comparison_topics or []
 
     trajectories: list[TrajectorySeries] = []
-    primary_samples = extract_trajectory_from_topic(bag_path, primary_topic)
+    primary_samples = extract_trajectory_from_topic(bag_path, primary_topic, ros_distro=ros_distro)
     primary_series = normalize_series_time(
         TrajectorySeries(
             id=primary_topic.strip("/").replace("/", "_"),
@@ -44,7 +45,7 @@ def build_experiment_payload(
     trajectories.append(primary_series)
 
     for topic in comparison_topics:
-        samples = extract_trajectory_from_topic(bag_path, topic)
+        samples = extract_trajectory_from_topic(bag_path, topic, ros_distro=ros_distro)
         trajectories.append(
             normalize_series_time(
                 TrajectorySeries(
@@ -82,7 +83,7 @@ def build_experiment_payload(
         trajectories[0] = primary_series
         trajectories.append(downsample_series(gt_series, max_samples=4000))
 
-    map_base_samples, map_base_method = extract_map_base_trajectory(bag_path)
+    map_base_samples, map_base_method = extract_map_base_trajectory(bag_path, ros_distro=ros_distro)
     map_base_series: TrajectorySeries | None = None
     if map_base_samples:
         map_base_series = normalize_series_time(
@@ -102,7 +103,7 @@ def build_experiment_payload(
 
     trajectories[0] = downsample_series(trajectories[0], max_samples=2500)
 
-    metrics = {
+    metrics: dict[str, float] = {
         "duration_sec": max((series.samples[-1].t_sec for series in trajectories if series.samples), default=0.0),
         "path_length_m": path_length(primary_series.samples),
     }
@@ -111,8 +112,8 @@ def build_experiment_payload(
 
     reference_samples = map_base_samples if map_base_samples else primary_samples
     t0 = reference_samples[0].t_sec if reference_samples else 0.0
-    map_points = extract_map_points(bag_path)
-    scans = extract_scan_points(bag_path, reference_samples)
+    map_points = extract_map_points(bag_path, ros_distro=ros_distro)
+    scans = extract_scan_points(bag_path, reference_samples, ros_distro=ros_distro)
     scene = {
         "map": map_points,
         "scans": [

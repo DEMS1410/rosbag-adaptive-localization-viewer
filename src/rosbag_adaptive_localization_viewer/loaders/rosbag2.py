@@ -82,13 +82,37 @@ def _interpolate_pose(samples: list[TrajectorySample], t_sec: float) -> tuple[fl
     return None
 
 
-def extract_trajectory_from_topic(db3_path: str | Path, topic: str) -> list[TrajectorySample]:
-    from rosbags.highlevel import AnyReader
+def _get_typestore(ros_distro: str = "humble"):
+    """Return a rosbags typestore for the given ROS 2 distribution name.
+
+    Falls back to ROS2_HUMBLE if the requested distribution is unknown or
+    not supported by the installed version of rosbags.
+    """
     from rosbags.typesys import Stores, get_typestore
+
+    _STORE_MAP: dict[str, str] = {
+        "foxy": "ROS2_FOXY",
+        "galactic": "ROS2_GALACTIC",
+        "humble": "ROS2_HUMBLE",
+        "iron": "ROS2_IRON",
+        "jazzy": "ROS2_JAZZY",
+        "rolling": "ROS2_ROLLING",
+    }
+    store_attr = _STORE_MAP.get(ros_distro.lower(), "ROS2_HUMBLE")
+    store = getattr(Stores, store_attr, Stores.ROS2_HUMBLE)
+    return get_typestore(store)
+
+
+def extract_trajectory_from_topic(
+    db3_path: str | Path,
+    topic: str,
+    ros_distro: str = "humble",
+) -> list[TrajectorySample]:
+    from rosbags.highlevel import AnyReader
 
     bag_path = Path(db3_path)
     samples: list[TrajectorySample] = []
-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    typestore = _get_typestore(ros_distro)
 
     with AnyReader([bag_path], default_typestore=typestore) as reader:
         connections = [connection for connection in reader.connections if connection.topic == topic]
@@ -98,17 +122,28 @@ def extract_trajectory_from_topic(db3_path: str | Path, topic: str) -> list[Traj
         for connection, timestamp, rawdata in reader.messages(connections=connections):
             msg = reader.deserialize(rawdata, connection.msgtype)
 
-            if connection.msgtype == "nav_msgs/msg/Odometry":
+            is_odometry = connection.msgtype == "nav_msgs/msg/Odometry"
+            is_pose_stamped = connection.msgtype == "geometry_msgs/msg/PoseStamped"
+
+            if is_odometry:
                 pose = msg.pose.pose
                 position = pose.position
                 orientation = pose.orientation
-            elif connection.msgtype == "geometry_msgs/msg/PoseStamped":
+                # Only Odometry carries PoseWithCovariance which has .covariance
+                cov_xx = float(msg.pose.covariance[0])
+                cov_xy = float(msg.pose.covariance[1])
+                cov_yy = float(msg.pose.covariance[7])
+                yaw_var = float(msg.pose.covariance[35])
+            elif is_pose_stamped:
                 pose = msg.pose
                 position = pose.position
                 orientation = pose.orientation
+                # PoseStamped.pose is a plain Pose — no covariance field
+                cov_xx = cov_xy = cov_yy = yaw_var = None
             else:
                 raise ValueError(
-                    f"Topic '{topic}' uses unsupported message type '{connection.msgtype}' for trajectory extraction."
+                    f"Topic '{topic}' uses unsupported message type '{connection.msgtype}' "
+                    "for trajectory extraction."
                 )
 
             samples.append(
@@ -123,10 +158,10 @@ def extract_trajectory_from_topic(db3_path: str | Path, topic: str) -> list[Traj
                         float(orientation.z),
                         float(orientation.w),
                     ),
-                    cov_xx=float(msg.pose.covariance[0]) if hasattr(msg, "pose") else None,
-                    cov_xy=float(msg.pose.covariance[1]) if hasattr(msg, "pose") else None,
-                    cov_yy=float(msg.pose.covariance[7]) if hasattr(msg, "pose") else None,
-                    yaw_var=float(msg.pose.covariance[35]) if hasattr(msg, "pose") else None,
+                    cov_xx=cov_xx,
+                    cov_xy=cov_xy,
+                    cov_yy=cov_yy,
+                    yaw_var=yaw_var,
                     source=topic,
                 )
             )
@@ -139,12 +174,12 @@ def extract_tf_pair_trajectory(
     parent_frame: str,
     child_frame: str,
     topics: tuple[str, ...] = ("/tf", "/tf_static"),
+    ros_distro: str = "humble",
 ) -> list[TrajectorySample]:
     from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
 
     bag_path = Path(db3_path)
-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    typestore = _get_typestore(ros_distro)
     samples: list[TrajectorySample] = []
 
     with AnyReader([bag_path], default_typestore=typestore) as reader:
@@ -194,18 +229,19 @@ def extract_map_base_trajectory(
     db3_path: str | Path,
     base_candidates: tuple[str, ...] = ("base_footprint", "base_link"),
     tolerance_sec: float = 0.05,
+    ros_distro: str = "humble",
 ) -> tuple[list[TrajectorySample], str | None]:
     for base_frame in base_candidates:
-        direct = extract_tf_pair_trajectory(db3_path, "map", base_frame)
+        direct = extract_tf_pair_trajectory(db3_path, "map", base_frame, ros_distro=ros_distro)
         if direct:
             return direct, f"direct: map->{base_frame}"
 
-    map_odom = extract_tf_pair_trajectory(db3_path, "map", "odom")
+    map_odom = extract_tf_pair_trajectory(db3_path, "map", "odom", ros_distro=ros_distro)
     if not map_odom:
         return [], None
 
     for base_frame in base_candidates:
-        odom_base = extract_tf_pair_trajectory(db3_path, "odom", base_frame)
+        odom_base = extract_tf_pair_trajectory(db3_path, "odom", base_frame, ros_distro=ros_distro)
         if not odom_base:
             continue
 
@@ -243,12 +279,15 @@ def extract_map_base_trajectory(
     return [], None
 
 
-def extract_map_points(db3_path: str | Path, topic: str = "/map") -> dict | None:
+def extract_map_points(
+    db3_path: str | Path,
+    topic: str = "/map",
+    ros_distro: str = "humble",
+) -> dict | None:
     from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
 
     bag_path = Path(db3_path)
-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    typestore = _get_typestore(ros_distro)
 
     with AnyReader([bag_path], default_typestore=typestore) as reader:
         connections = [connection for connection in reader.connections if connection.topic == topic]
@@ -292,12 +331,12 @@ def extract_scan_points(
     topic: str = "/scan",
     max_scans: int = 140,
     range_stride: int = 4,
+    ros_distro: str = "humble",
 ) -> list[dict]:
     from rosbags.highlevel import AnyReader
-    from rosbags.typesys import Stores, get_typestore
 
     bag_path = Path(db3_path)
-    typestore = get_typestore(Stores.ROS2_HUMBLE)
+    typestore = _get_typestore(ros_distro)
     scans: list[dict] = []
 
     with AnyReader([bag_path], default_typestore=typestore) as reader:
